@@ -9,6 +9,7 @@ public sealed class AppConfig
     public string GameDirectory { get; set; } = "";
     public string ExportDirectory { get; set; } = Path.Combine(AppContext.BaseDirectory, "Export");
     public string BlenderPath { get; set; } = "";
+    public string ExportFormat { get; set; } = nameof(PakoMeshExportFormat.Glb);
     public bool DarkTheme { get; set; } = true;
 }
 

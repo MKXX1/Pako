@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Reflection;
+using System.Text.Json;
 using System.Threading;
 using CUE4Parse.Compression;
 using CUE4Parse.Encryption.Aes;
@@ -29,7 +30,7 @@ using CUE4Parse_Conversion.UEFormat.Enums;
 
 namespace Pako;
 
-public sealed class OutlastAssetService
+public sealed class OPP_PakMount
 {
     private const string AesKey = "0x613E92E0F3CE880FC652EC86254E2581126AE86D63BA46550FB2CE0EC2EDA439";
     private static readonly ModelScanRoot[] ModelScanRoots =
@@ -41,6 +42,7 @@ public sealed class OutlastAssetService
     private readonly VersionContainer _version = new(EGame.GAME_OutlastTrials, ETexturePlatform.DesktopMobile);
     private DefaultFileProvider? _provider;
     private bool _detexInitialized;
+    private string _modelIndexCacheKey = "";
 
     public IReadOnlyList<ModelItem> Models => _models;
     public string Status { get; private set; } = "Game is not mounted";
@@ -101,6 +103,7 @@ public sealed class OutlastAssetService
 
             _provider = provider;
             GameDirectory = paksPath;
+            _modelIndexCacheKey = BuildModelIndexCacheKey(paksPath);
             _models.Clear();
             Status = $"Mounted: {paksPath}";
             return true;
@@ -126,6 +129,15 @@ public sealed class OutlastAssetService
 
         try
         {
+            if (TryLoadModelIndexCache(out var cachedModels))
+            {
+                _models.AddRange(cachedModels);
+                ScanCompleted = 1;
+                ScanTotal = 1;
+                Status = $"Models loaded from cache: {_models.Count}";
+                return;
+            }
+
             var files = _provider.Files.Values
                 .Select(f => new ScannableFile(f, GetModelCategory(f.Path)))
                 .Where(f => f.Category != ModelCategory.Other && f.File.Path.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase))
@@ -183,6 +195,7 @@ public sealed class OutlastAssetService
                 .DistinctBy(m => m.ObjectPath)
                 .OrderBy(m => m.DisplayName, StringComparer.OrdinalIgnoreCase));
 
+            SaveModelIndexCache(_models);
             Status = $"Models loaded: {_models.Count}";
         }
         catch (OperationCanceledException)
@@ -274,7 +287,7 @@ public sealed class OutlastAssetService
             return false;
         }
 
-        if (!BlenderFbxConverter.TryConvertPskToFbx(pskFile, exportDirectory, out savedFilePath, out error))
+        if (!BlenderFbx.TryConvertPskToFbx(pskFile, exportDirectory, out savedFilePath, out error))
             return false;
 
         return File.Exists(savedFilePath);
@@ -379,6 +392,70 @@ public sealed class OutlastAssetService
             ModelCategory.Props => "Props",
             _ => "Other"
         };
+    }
+
+    private bool TryLoadModelIndexCache(out List<ModelItem> models)
+    {
+        models = new List<ModelItem>();
+        if (string.IsNullOrWhiteSpace(_modelIndexCacheKey)) return false;
+
+        try
+        {
+            var path = GetModelIndexCachePath();
+            if (!File.Exists(path)) return false;
+
+            var cache = JsonSerializer.Deserialize<ModelIndexCache>(File.ReadAllText(path));
+            if (cache == null || cache.Version != 1 || !string.Equals(cache.Key, _modelIndexCacheKey, StringComparison.Ordinal))
+                return false;
+
+            models = cache.Models
+                .DistinctBy(m => m.ObjectPath)
+                .OrderBy(m => m.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            return models.Count > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void SaveModelIndexCache(IReadOnlyList<ModelItem> models)
+    {
+        if (string.IsNullOrWhiteSpace(_modelIndexCacheKey) || models.Count == 0) return;
+
+        try
+        {
+            var cache = new ModelIndexCache(1, _modelIndexCacheKey, models.ToArray());
+            File.WriteAllText(GetModelIndexCachePath(), JsonSerializer.Serialize(cache, new JsonSerializerOptions { WriteIndented = false }));
+        }
+        catch
+        {
+            // A cache failure should not prevent the browser from working.
+        }
+    }
+
+    private static string GetModelIndexCachePath()
+    {
+        return Path.Combine(AppContext.BaseDirectory, "model-index-cache.json");
+    }
+
+    private static string BuildModelIndexCacheKey(string paksPath)
+    {
+        var containers = Directory.EnumerateFiles(paksPath, "*.*", SearchOption.TopDirectoryOnly)
+            .Where(path =>
+                path.EndsWith(".pak", StringComparison.OrdinalIgnoreCase) ||
+                path.EndsWith(".utoc", StringComparison.OrdinalIgnoreCase) ||
+                path.EndsWith(".ucas", StringComparison.OrdinalIgnoreCase) ||
+                path.EndsWith(".sig", StringComparison.OrdinalIgnoreCase))
+            .Select(path =>
+            {
+                var info = new FileInfo(path);
+                return $"{info.Name}:{info.Length}:{info.LastWriteTimeUtc.Ticks}";
+            })
+            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase);
+
+        return Path.GetFullPath(paksPath).ToUpperInvariant() + "|" + string.Join("|", containers);
     }
 
     private void EnsureDetexInitialized()
@@ -518,9 +595,14 @@ public sealed class OutlastAssetService
         }
 
         var lightDir = Vector3.Normalize(new Vector3(-0.45f, -0.70f, 0.55f));
-        var maxTriangles = Math.Min(indices.Count / 3, 18000);
+        var totalTriangles = indices.Count / 3;
+        var triangleBudget = size >= 160 ? 70000 : 45000;
+        var triangleStep = Math.Max(1, (int)MathF.Ceiling(totalTriangles / (float)triangleBudget));
 
-        for (var triangle = 0; triangle < maxTriangles; triangle++)
+        if (triangleStep > 1)
+            DrawVertexCloud(pixels, depth, transformed, baseColor, size);
+
+        for (var triangle = 0; triangle < totalTriangles; triangle += triangleStep)
         {
             var i0 = (int)indices[triangle * 3];
             var i1 = (int)indices[triangle * 3 + 1];
@@ -699,4 +781,5 @@ public sealed class OutlastAssetService
     {
         public string Path => File.Path;
     }
+    private sealed record ModelIndexCache(int Version, string Key, ModelItem[] Models);
 }

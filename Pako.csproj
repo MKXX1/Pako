@@ -7,6 +7,7 @@
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ProduceReferenceAssembly>False</ProduceReferenceAssembly>
+    <ApplicationIcon>ico.ico</ApplicationIcon>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
     <DebugType>embedded</DebugType>
@@ -36,6 +37,7 @@
     <None Include="utils\oo2core_9_win64.dll" CopyToOutputDirectory="PreserveNewest" />
     <None Include="CUE4Parse-Natives.dll" CopyToOutputDirectory="PreserveNewest" />
     <None Include="BlenderAddons\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="ico.ico" />
     <EmbeddedResource Include="Shaders\GLSL\imgui-vertex.glsl" LogicalName="imgui-vertex.glsl" />
     <EmbeddedResource Include="Shaders\GLSL\imgui-frag.glsl" LogicalName="imgui-frag.glsl" />
     <EmbeddedResource Include="Shaders\HLSL\imgui-vertex.hlsl.bytes" LogicalName="imgui-vertex.hlsl.bytes" />

@@ -19,14 +19,14 @@ public sealed class ThumbnailCache : IDisposable
         public IntPtr Binding;
     }
 
-    private readonly OutlastAssetService _assets;
+    private readonly OPP_PakMount _assets;
     private readonly int _size;
     private readonly Dictionary<string, Entry> _entries = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<Texture> _textures = new();
     private readonly ConcurrentQueue<CompletedThumbnail> _completed = new();
     private readonly SemaphoreSlim _workers = new(2, 2);
 
-    public ThumbnailCache(OutlastAssetService assets, int size)
+    public ThumbnailCache(OPP_PakMount assets, int size)
     {
         _assets = assets;
         _size = size;

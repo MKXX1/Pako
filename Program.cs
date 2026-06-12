@@ -28,7 +28,7 @@ internal static class Program
     private static CommandList _commandList = null!;
     private static ImGuiController _controller = null!;
     private static readonly ConfigStore ConfigStore = new();
-    private static readonly OutlastAssetService Assets = new();
+    private static readonly OPP_PakMount Assets = new();
     private static readonly ThumbnailCache Thumbnails = new(Assets, 160);
     private static readonly List<string> Logs = new();
     private static AppScreen _screen = AppScreen.Setup;
@@ -59,7 +59,8 @@ internal static class Program
         ImGui.GetIO().Fonts.AddFontDefault();
         _setupPath = ConfigStore.Config.GameDirectory;
         _blenderPath = ConfigStore.Config.BlenderPath;
-        BlenderFbxConverter.BlenderPath = _blenderPath;
+        _exportFormat = ParseExportFormat(ConfigStore.Config.ExportFormat);
+        BlenderFbx.BlenderPath = _blenderPath;
 
         VeldridStartup.CreateWindowAndGraphicsDevice(
             new WindowCreateInfo(80, 80, 1500, 900, WindowState.Normal, "Pako - Outlast Trials Model Browser"),
@@ -130,7 +131,7 @@ internal static class Program
             var objectPath = GetArg(args, "--object");
             var outputPath = GetArg(args, "--output");
             var formatText = GetArg(args, "--format") ?? "glb";
-            BlenderFbxConverter.BlenderPath = GetArg(args, "--blender") ?? ConfigStore.Config.BlenderPath;
+            BlenderFbx.BlenderPath = GetArg(args, "--blender") ?? ConfigStore.Config.BlenderPath;
 
             if (string.IsNullOrWhiteSpace(gamePath) ||
                 string.IsNullOrWhiteSpace(objectPath) ||
@@ -148,7 +149,7 @@ internal static class Program
                 _ => PakoMeshExportFormat.Glb
             };
 
-            var service = new OutlastAssetService();
+            var service = new OPP_PakMount();
             if (!service.Mount(gamePath, out var mountError))
             {
                 Console.Error.WriteLine($"Mount failed: {mountError}");
@@ -322,13 +323,13 @@ internal static class Program
         if (ImGui.Button("Browse Blender", new Vector2(150f, 0f)))
             BrowseBlender(path => _pendingBlenderFile = path);
 
-        ImGui.SameLine();
-        if (ImGui.Button("Save Blender", new Vector2(130f, 0f)))
-            SaveBlenderPath(_blenderPath);
-
-        ImGui.SameLine();
-        if (ImGui.Button("Auto", new Vector2(70f, 0f)))
-            SaveBlenderPath("");
+      //  ImGui.SameLine();
+      //  if (ImGui.Button("Save Blender", new Vector2(130f, 0f)))
+      //      SaveBlenderPath(_blenderPath);
+      //
+      //  ImGui.SameLine();
+      //  if (ImGui.Button("Auto", new Vector2(70f, 0f)))
+      //      SaveBlenderPath("");
 
         if (!string.IsNullOrWhiteSpace(_loadError))
         {
@@ -644,12 +645,12 @@ internal static class Program
             BrowseBlender(path => _pendingBlenderFile = path);
 
         ImGui.SameLine();
-        if (ImGui.Button("Save Blender"))
-            SaveBlenderPath(_blenderPath);
-
-        ImGui.SameLine();
-        if (ImGui.Button("Auto Detect"))
-            SaveBlenderPath("");
+      //if (ImGui.Button("Save Blender"))
+      //    SaveBlenderPath(_blenderPath);
+      //
+      //ImGui.SameLine();
+      //if (ImGui.Button("Auto Detect"))
+      //    SaveBlenderPath("");
 
         if (!string.IsNullOrEmpty(_lastExport))
         {
@@ -811,7 +812,7 @@ internal static class Program
         if (!string.Equals(_blenderPath.Trim(), ConfigStore.Config.BlenderPath, StringComparison.Ordinal))
             SaveBlenderPath(_blenderPath);
         else
-            BlenderFbxConverter.BlenderPath = ConfigStore.Config.BlenderPath;
+            BlenderFbx.BlenderPath = ConfigStore.Config.BlenderPath;
 
         var ok = Assets.ExportModel(model, ConfigStore.Config.ExportDirectory, _exportFormat, out _lastExport, out var error);
 
@@ -831,7 +832,18 @@ internal static class Program
         var current = (int)_exportFormat;
         ImGui.SetNextItemWidth(260);
         if (ImGui.Combo("Export Format", ref current, labels, labels.Length))
+        {
             _exportFormat = (PakoMeshExportFormat)current;
+            ConfigStore.Config.ExportFormat = _exportFormat.ToString();
+            ConfigStore.Save();
+        }
+    }
+
+    private static PakoMeshExportFormat ParseExportFormat(string? value)
+    {
+        return Enum.TryParse<PakoMeshExportFormat>(value, true, out var format)
+            ? format
+            : PakoMeshExportFormat.Glb;
     }
 
     private static string GetExportFormatLabel()
@@ -938,7 +950,7 @@ internal static class Program
     {
         _blenderPath = path.Trim();
         ConfigStore.Config.BlenderPath = _blenderPath;
-        BlenderFbxConverter.BlenderPath = _blenderPath;
+        BlenderFbx.BlenderPath = _blenderPath;
         ConfigStore.Save();
         Log(string.IsNullOrWhiteSpace(_blenderPath)
             ? "Blender path cleared; using auto-detect."

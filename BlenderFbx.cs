@@ -6,7 +6,7 @@ using System.Text;
 
 namespace Pako;
 
-public static class BlenderFbxConverter
+public static class BlenderFbx
 {
     public static string BlenderPath { get; set; } = "";
 
