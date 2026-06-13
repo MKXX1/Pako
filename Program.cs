@@ -47,6 +47,31 @@ internal static class Program
     private static string _blenderPath = "";
     private static string _lastExport = "";
     private static PakoMeshExportFormat _exportFormat = PakoMeshExportFormat.Glb;
+    private static bool _previewOpen;
+    private static ModelItem? _previewModel;
+    private static ModelClass? _previewScene;
+    private static Task<PreviewLoadResult>? _previewLoadTask;
+    private static string _previewError = "";
+    private const float PreviewDefaultYaw = -0.65f;
+    private const float PreviewDefaultPitch = 0.18f;
+    private const float PreviewDefaultZoom = 1.38f;
+    private const float PreviewDefaultLightYaw = -0.58f;
+    private const float PreviewDefaultLightPitch = 0.72f;
+    private const float PreviewDefaultLightIntensity = 0.78f;
+    private const float PreviewDefaultAmbientLight = 0.28f;
+    private static float _previewYaw = PreviewDefaultYaw;
+    private static float _previewPitch = PreviewDefaultPitch;
+    private static float _previewZoom = 1f;
+    private static bool _previewShowGrid = true;
+    private static bool _previewUseTextures = true;
+    private static bool _previewSingleMaterial;
+    private static float _previewLightYaw = PreviewDefaultLightYaw;
+    private static float _previewLightPitch = PreviewDefaultLightPitch;
+    private static float _previewLightIntensity = PreviewDefaultLightIntensity;
+    private static float _previewAmbientLight = PreviewDefaultAmbientLight;
+    private static GPU_ModelRender? _gpuPreviewRenderer;
+    private static bool _gpuPreviewSceneDirty;
+    private static string _gpuPreviewError = "";
 
     [STAThread]
     private static int Main(string[] args)
@@ -92,6 +117,7 @@ internal static class Program
             DrawUi();
 
             _commandList.Begin();
+            RenderGpuPreview();
             _commandList.SetFramebuffer(_graphicsDevice.MainSwapchain.Framebuffer);
             _commandList.ClearColorTarget(0, new RgbaFloat(0.055f, 0.058f, 0.064f, 1f));
             _controller.Render(_graphicsDevice, _commandList);
@@ -104,6 +130,7 @@ internal static class Program
         _graphicsDevice.WaitForIdle();
         _controller.Dispose();
         Thumbnails.Dispose();
+        _gpuPreviewRenderer?.Dispose();
         _commandList.Dispose();
         _graphicsDevice.Dispose();
         return 0;
@@ -262,6 +289,8 @@ internal static class Program
                 DrawBrowserUi();
                 break;
         }
+
+        DrawModelPreviewWindow();
 
         ImGui.End();
     }
@@ -489,6 +518,8 @@ internal static class Program
         var hovered = ImGui.IsItemHovered();
         if (ImGui.IsItemClicked())
             _selectedModel = model;
+        if (hovered && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
+            OpenModelPreview(model);
 
         var bg = selected
             ? new Vector4(0.18f, 0.32f, 0.40f, 1f)
@@ -520,6 +551,8 @@ internal static class Program
         {
             if (ImGui.MenuItem("Copy Object Path"))
                 ImGui.SetClipboardText(model.ObjectPath);
+            if (ImGui.MenuItem("Open Preview"))
+                OpenModelPreview(model);
             if (ImGui.MenuItem($"Export {GetExportFormatLabel()}"))
                 Export(model);
             ImGui.EndPopup();
@@ -622,6 +655,10 @@ internal static class Program
             ImGui.Spacing();
             if (ImGui.Button($"Export {GetExportFormatLabel()}"))
                 Export(_selectedModel);
+
+            ImGui.SameLine();
+            if (ImGui.Button("Preview"))
+                OpenModelPreview(_selectedModel);
 
             ImGui.SameLine();
             if (ImGui.Button("Copy Path"))
@@ -826,6 +863,228 @@ internal static class Program
         }
     }
 
+    private static void OpenModelPreview(ModelItem model)
+    {
+        _previewOpen = true;
+        _previewModel = model;
+        _previewScene = null;
+        _previewError = "";
+        ResetPreviewView();
+        _previewUseTextures = true;
+        _previewSingleMaterial = false;
+        _previewLoadTask = Task.Run(() =>
+        {
+            var scene = Assets.CreatePreviewScene(model, out var error);
+            return new PreviewLoadResult(scene, error);
+        });
+        Log($"Opening preview: {model.DisplayName}");
+    }
+
+    private static void ResetPreviewView()
+    {
+        _previewYaw = PreviewDefaultYaw;
+        _previewPitch = PreviewDefaultPitch;
+        _previewZoom = PreviewDefaultZoom;
+        _previewLightYaw = PreviewDefaultLightYaw;
+        _previewLightPitch = PreviewDefaultLightPitch;
+        _previewLightIntensity = PreviewDefaultLightIntensity;
+        _previewAmbientLight = PreviewDefaultAmbientLight;
+    }
+
+    private static void DrawModelPreviewWindow()
+    {
+        if (!_previewOpen)
+            return;
+
+        if (_previewLoadTask?.IsCompleted == true)
+        {
+            try
+            {
+                var result = _previewLoadTask.GetAwaiter().GetResult();
+                _previewScene = result.Scene;
+                _previewError = result.Error;
+                _gpuPreviewSceneDirty = _previewScene != null;
+            }
+            catch (Exception ex)
+            {
+                _previewScene = null;
+                _previewError = ex.Message;
+            }
+            finally
+            {
+                _previewLoadTask = null;
+            }
+        }
+
+        ImGui.SetNextWindowSize(new Vector2(900f, 760f), ImGuiCond.FirstUseEver);
+        var open = _previewOpen;
+        if (!ImGui.Begin("Model Preview", ref open, ImGuiWindowFlags.NoCollapse))
+        {
+            _previewOpen = open;
+            ImGui.End();
+            return;
+        }
+        _previewOpen = open;
+
+        if (_previewModel == null)
+        {
+            ImGui.TextUnformatted("No model selected.");
+            ImGui.End();
+            return;
+        }
+
+        ImGui.TextUnformatted(_previewModel.DisplayName);
+        ImGui.SameLine();
+        ImGui.TextColored(new Vector4(0.58f, 0.80f, 0.78f, 1f), _previewModel.Kind == ModelKind.SkeletalMesh ? "Skeletal Mesh" : "Static Mesh");
+
+        ImGui.SameLine();
+        if (ImGui.Button("Reset"))
+        {
+            ResetPreviewView();
+        }
+
+        ImGui.SameLine();
+        ImGui.Checkbox("Grid", ref _previewShowGrid);
+
+        ImGui.SameLine();
+        ImGui.Checkbox("Textures", ref _previewUseTextures);
+
+        ImGui.SameLine();
+        ImGui.Checkbox("Single Material", ref _previewSingleMaterial);
+
+        ImGui.SetNextItemWidth(150f);
+        ImGui.SliderFloat("Light Yaw", ref _previewLightYaw, -MathF.PI, MathF.PI, "%.2f");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(150f);
+        ImGui.SliderFloat("Light Height", ref _previewLightPitch, 0.05f, 1.45f, "%.2f");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(120f);
+        ImGui.SliderFloat("Strength", ref _previewLightIntensity, 0f, 1.6f, "%.2f");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(120f);
+        ImGui.SliderFloat("Ambient", ref _previewAmbientLight, 0.02f, 0.8f, "%.2f");
+
+        ImGui.Separator();
+
+        if (_previewLoadTask != null)
+        {
+            var drawList = ImGui.GetWindowDrawList();
+            var cursor = ImGui.GetCursorScreenPos();
+            DrawSpinner(drawList, cursor + new Vector2(18f, 18f), 12f, Color(new Vector4(0.72f, 0.92f, 0.90f, 1f)));
+            ImGui.Dummy(new Vector2(38f, 32f));
+            ImGui.SameLine();
+            ImGui.TextUnformatted("Loading preview...");
+            ImGui.End();
+            return;
+        }
+
+        if (_previewScene == null)
+        {
+            ImGui.TextColored(new Vector4(0.95f, 0.42f, 0.36f, 1f), string.IsNullOrWhiteSpace(_previewError) ? "Preview could not be loaded." : _previewError);
+            ImGui.End();
+            return;
+        }
+
+        if (!EnsureGpuPreviewRenderer())
+        {
+            ImGui.TextColored(new Vector4(0.95f, 0.42f, 0.36f, 1f), _gpuPreviewError);
+            ImGui.End();
+            return;
+        }
+
+        var avail = ImGui.GetContentRegionAvail();
+        var imageSize = MathF.Max(260f, MathF.Min(avail.X, MathF.Max(260f, avail.Y - 112f)));
+        var imagePos = ImGui.GetCursorScreenPos();
+        ImGui.InvisibleButton("##preview-viewport", new Vector2(imageSize, imageSize));
+
+        if (ImGui.IsItemHovered())
+        {
+            var io = ImGui.GetIO();
+            if (io.MouseWheel != 0f)
+            {
+                _previewZoom = Math.Clamp(_previewZoom * (1f + io.MouseWheel * 0.10f), 0.25f, 5f);
+            }
+
+            if (ImGui.IsMouseDragging(ImGuiMouseButton.Left))
+            {
+                var delta = io.MouseDelta;
+                _previewYaw += delta.X * 0.010f;
+                _previewPitch = Math.Clamp(_previewPitch + delta.Y * 0.010f, -1.35f, 1.35f);
+            }
+        }
+
+        ImGui.GetWindowDrawList().AddImage(_gpuPreviewRenderer!.ImGuiBinding, imagePos, imagePos + new Vector2(imageSize, imageSize));
+
+        ImGui.TextColored(new Vector4(0.57f, 0.60f, 0.64f, 1f), $"Vertices: {_previewScene.VertexCount:n0}  Triangles: {_previewScene.TriangleCount:n0}  Materials: {_previewScene.Materials.Length:n0}");
+        ImGui.TextWrapped(_previewModel.ObjectPath);
+
+        if (ImGui.CollapsingHeader("Materials"))
+        {
+            foreach (var material in _previewScene.Materials.Take(80))
+            {
+                ImGui.ColorButton($"##mat-{material.Name}", new Vector4(material.Color, 1f), ImGuiColorEditFlags.NoTooltip, new Vector2(14f, 14f));
+                ImGui.SameLine();
+                ImGui.TextUnformatted(material.Diffuse == null ? material.Name : $"{material.Name}  [{material.Diffuse.Name}]");
+            }
+        }
+
+        ImGui.End();
+    }
+
+    private static bool EnsureGpuPreviewRenderer()
+    {
+        if (_gpuPreviewRenderer == null)
+        {
+            try
+            {
+                _gpuPreviewRenderer = new GPU_ModelRender(_graphicsDevice, _controller);
+                _gpuPreviewError = "";
+                _gpuPreviewSceneDirty = _previewScene != null;
+            }
+            catch (Exception ex)
+            {
+                _gpuPreviewError = $"GPU preview failed to initialize: {ex.Message}";
+                return false;
+            }
+        }
+
+        if (_gpuPreviewSceneDirty && _previewScene != null)
+        {
+            try
+            {
+                _gpuPreviewRenderer.LoadScene(_previewScene);
+                _gpuPreviewSceneDirty = false;
+                _gpuPreviewError = "";
+            }
+            catch (Exception ex)
+            {
+                _gpuPreviewError = $"GPU preview failed to load scene: {ex.Message}";
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static void RenderGpuPreview()
+    {
+        if (!_previewOpen || _previewScene == null || _gpuPreviewRenderer == null || _gpuPreviewSceneDirty)
+            return;
+
+        _gpuPreviewRenderer.Render(
+            _commandList,
+            _previewYaw,
+            _previewPitch,
+            _previewZoom,
+            _previewShowGrid,
+            _previewUseTextures,
+            _previewSingleMaterial,
+            _previewLightYaw,
+            _previewLightPitch,
+            _previewLightIntensity,
+            _previewAmbientLight);
+    }
+
     private static void DrawExportFormatSelector()
     {
         var labels = new[] { "GLB (quick preview)", "ActorX PSK/PSKX (better skeleton)", "FBX via Blender (PSK -> FBX)" };
@@ -985,4 +1244,6 @@ internal static class Program
             ImGui.StyleColorsLight();
         }
     }
+
+    private readonly record struct PreviewLoadResult(ModelClass? Scene, string Error);
 }

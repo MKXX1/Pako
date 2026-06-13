@@ -326,6 +326,8 @@ public sealed class OPP_PakMount
 
         try
         {
+            EnsureDetexInitialized();
+
             if (!_provider.TryLoadPackageObject(model.ObjectPath, out UObject export))
             {
                 error = $"Could not load {model.ObjectPath}";
@@ -338,6 +340,48 @@ public sealed class OPP_PakMount
                     return RenderAndDispose(converted, size, model);
                 case USkeletalMesh skeletalMesh when skeletalMesh.TryConvert(out CSkeletalMesh converted):
                     return RenderAndDispose(converted, size, model);
+                case UStaticMesh:
+                    error = "Static mesh conversion returned no renderable LOD.";
+                    return null;
+                case USkeletalMesh:
+                    error = "Skeletal mesh conversion returned no renderable LOD.";
+                    return null;
+                default:
+                    error = $"Unsupported export type: {export.GetType().Name}";
+                    return null;
+            }
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+            return null;
+        }
+    }
+
+    public ModelClass? CreatePreviewScene(ModelItem model, out string error)
+    {
+        error = "";
+
+        if (_provider == null)
+        {
+            error = "Game is not mounted.";
+            return null;
+        }
+
+        try
+        {
+            if (!_provider.TryLoadPackageObject(model.ObjectPath, out UObject export))
+            {
+                error = $"Could not load {model.ObjectPath}";
+                return null;
+            }
+
+            switch (export)
+            {
+                case UStaticMesh staticMesh when staticMesh.TryConvert(out CStaticMesh converted, ENaniteMeshFormat.OnlyNormalLODs):
+                    return CreatePreviewSceneAndDispose(converted, model, out error);
+                case USkeletalMesh skeletalMesh when skeletalMesh.TryConvert(out CSkeletalMesh converted):
+                    return CreatePreviewSceneAndDispose(converted, model, out error);
                 case UStaticMesh:
                     error = "Static mesh conversion returned no renderable LOD.";
                     return null;
@@ -490,6 +534,312 @@ public sealed class OPP_PakMount
         }
 
         return null;
+    }
+
+    private static ModelClass? CreatePreviewSceneAndDispose(CStaticMesh mesh, ModelItem model, out string error)
+    {
+        try
+        {
+            foreach (var lod in mesh.LODs)
+            {
+                if (lod.Verts == null || lod.Verts.Length == 0) continue;
+                var indices = lod.Indices == null ? Array.Empty<uint>() : ReadIndices(lod.Indices.Value).ToArray();
+                var sections = lod.Sections?.Value ?? Array.Empty<CMeshSection>();
+                return BuildPreviewScene(model, lod.Verts, indices, sections, out error);
+            }
+        }
+        finally
+        {
+            (mesh as IDisposable)?.Dispose();
+        }
+
+        error = "No renderable static mesh LOD was found.";
+        return null;
+    }
+
+    private static ModelClass? CreatePreviewSceneAndDispose(CSkeletalMesh mesh, ModelItem model, out string error)
+    {
+        try
+        {
+            foreach (var lod in mesh.LODs)
+            {
+                if (lod.Verts == null || lod.Verts.Length == 0) continue;
+                var indices = lod.Indices == null ? Array.Empty<uint>() : ReadIndices(lod.Indices.Value).ToArray();
+                var sections = lod.Sections?.Value ?? Array.Empty<CMeshSection>();
+                return BuildPreviewScene(model, lod.Verts, indices, sections, out error);
+            }
+        }
+        finally
+        {
+            (mesh as IDisposable)?.Dispose();
+        }
+
+        error = "No renderable skeletal mesh LOD was found.";
+        return null;
+    }
+
+    private static ModelClass? BuildPreviewScene(ModelItem model, IReadOnlyList<CMeshVertex> vertices, uint[] indices, IReadOnlyList<CMeshSection> sections, out string error)
+    {
+        error = "";
+        if (vertices.Count == 0)
+        {
+            error = "Mesh has no vertices.";
+            return null;
+        }
+
+        if (indices.Length < 3)
+            indices = Enumerable.Range(0, vertices.Count).Select(i => (uint)i).ToArray();
+
+        var positions = new Vector3[vertices.Count];
+        var normals = new Vector3[vertices.Count];
+        var uvs = new Vector2[vertices.Count];
+        var min = new Vector3(float.MaxValue);
+        var max = new Vector3(float.MinValue);
+
+        for (var i = 0; i < vertices.Count; i++)
+        {
+            var p = vertices[i].Position;
+            var position = new Vector3(p.X, p.Z, p.Y);
+            positions[i] = position;
+            min = Vector3.Min(min, position);
+            max = Vector3.Max(max, position);
+
+            var n = vertices[i].Normal;
+            var normal = new Vector3(n.X, n.Z, n.Y);
+            normals[i] = normal.LengthSquared() > 0.000001f ? Vector3.Normalize(normal) : Vector3.UnitY;
+            uvs[i] = new Vector2(vertices[i].UV.U, vertices[i].UV.V);
+        }
+
+        var center = (min + max) * 0.5f;
+        var radius = 0f;
+        for (var i = 0; i < positions.Length; i++)
+            radius = MathF.Max(radius, Vector3.Distance(positions[i], center));
+
+        var materials = BuildPreviewMaterials(model, sections);
+        var triangleMaterials = new int[Math.Max(1, indices.Length / 3)];
+        if (sections.Count == 0)
+        {
+            Array.Fill(triangleMaterials, 0);
+        }
+        else
+        {
+            for (var sectionIndex = 0; sectionIndex < sections.Count; sectionIndex++)
+            {
+                var section = sections[sectionIndex];
+                var firstTriangle = Math.Max(0, section.FirstIndex / 3);
+                var lastTriangle = Math.Min(triangleMaterials.Length, firstTriangle + Math.Max(0, section.NumFaces));
+                for (var triangle = firstTriangle; triangle < lastTriangle; triangle++)
+                    triangleMaterials[triangle] = Math.Min(sectionIndex, materials.Length - 1);
+            }
+        }
+
+        return new ModelClass
+        {
+            DisplayName = model.DisplayName,
+            Kind = model.Kind,
+            Positions = positions,
+            Normals = normals,
+            UVs = uvs,
+            Indices = indices,
+            TriangleMaterials = triangleMaterials,
+            Materials = materials,
+            Center = center,
+            Radius = MathF.Max(radius, 1f)
+        };
+    }
+
+    private static PreviewMaterial[] BuildPreviewMaterials(ModelItem model, IReadOnlyList<CMeshSection> sections)
+    {
+        if (sections.Count == 0)
+            return
+            [
+                new PreviewMaterial
+                {
+                    Name = "Default",
+                    Color = ThumbnailColor(model.DisplayName, model.Kind)
+                }
+            ];
+
+        var materials = new PreviewMaterial[sections.Count];
+        for (var i = 0; i < sections.Count; i++)
+        {
+            var section = sections[i];
+            var name = section.MaterialName;
+            if (string.IsNullOrWhiteSpace(name))
+                name = section.Material?.Name.Text;
+            if (string.IsNullOrWhiteSpace(name))
+                name = $"Material {i + 1}";
+
+            var color = MaterialColor(name, i, model.Kind);
+            PreviewTexture? diffuse = null;
+            if (section.Material?.Load<UMaterialInterface>() is { } material)
+            {
+                TryReadMaterialPreview(material, ref color, out diffuse);
+            }
+
+            materials[i] = new PreviewMaterial
+            {
+                Name = name,
+                Color = color,
+                Diffuse = diffuse
+            };
+        }
+
+        return materials;
+    }
+
+    private static void TryReadMaterialPreview(UMaterialInterface material, ref Vector3 color, out PreviewTexture? diffuse)
+    {
+        diffuse = null;
+
+        try
+        {
+            var parameters = new CMaterialParams2();
+            material.GetParams(parameters, EMaterialFormat.AllLayers);
+
+            var candidate = FindBestDiffuseTexture(parameters);
+            if (candidate != null)
+            {
+                diffuse = DecodePreviewTexture(candidate);
+                if (diffuse != null)
+                    return;
+            }
+
+            if (parameters.TryGetLinearColor(out var linearColor, CMaterialParams2.Diffuse[0]))
+                color = new Vector3(linearColor.R, linearColor.G, linearColor.B);
+        }
+        catch
+        {
+            diffuse = null;
+        }
+    }
+
+    private static UTexture? FindBestDiffuseTexture(CMaterialParams2 parameters)
+    {
+        UTexture? best = null;
+        var bestScore = int.MinValue;
+
+        foreach (var nameGroup in CMaterialParams2.Diffuse)
+        {
+            foreach (var key in nameGroup)
+            {
+                if (!parameters.Textures.TryGetValue(key, out var unrealMaterial) || unrealMaterial is not UTexture texture)
+                    continue;
+
+                var score = ScoreDiffuseTexture(key, texture);
+                if (score <= bestScore)
+                    continue;
+
+                best = texture;
+                bestScore = score;
+            }
+        }
+
+        if (best != null && bestScore > -10)
+            return best;
+
+        return parameters.TryGetFirstTexture2d(out var first) ? first : null;
+    }
+
+    private static int ScoreDiffuseTexture(string parameterName, UTexture texture)
+    {
+        var haystack = (parameterName + " " + texture.Name + " " + texture.GetPathName()).ToLowerInvariant();
+        var score = 0;
+
+        if (haystack.Contains("basecolor") || haystack.Contains("base_color")) score += 80;
+        if (haystack.Contains("albedo")) score += 76;
+        if (haystack.Contains("diffuse")) score += 70;
+        if (haystack.Contains("_bc") || haystack.Contains("bc_") || haystack.Contains("bco")) score += 54;
+        if (haystack.Contains("color") || haystack.Contains("colour")) score += 36;
+        if (haystack.Contains("_d") || haystack.Contains(" d_")) score += 18;
+
+        if (haystack.Contains("normal") || haystack.Contains("_n") || haystack.Contains("nrm") || haystack.Contains("nor")) score -= 90;
+        if (haystack.Contains("mask") || haystack.Contains("packed") || haystack.Contains("orm") || haystack.Contains("mro") || haystack.Contains("rough") || haystack.Contains("metal") || haystack.Contains("ao")) score -= 80;
+        if (haystack.Contains("emissive") || haystack.Contains("_e")) score -= 40;
+        if (parameterName.Equals("Texture", StringComparison.OrdinalIgnoreCase) || parameterName.Equals("Color", StringComparison.OrdinalIgnoreCase)) score -= 18;
+
+        return score;
+    }
+
+    private static PreviewTexture? DecodePreviewTexture(UTexture texture)
+    {
+        var decoded = texture.Decode(512, ETexturePlatform.DesktopMobile);
+        if (decoded == null || decoded.Width <= 0 || decoded.Height <= 0)
+            return null;
+
+        var rgba = ToRgba(decoded);
+        if (rgba == null)
+            return null;
+
+        return new PreviewTexture
+        {
+            Width = decoded.Width,
+            Height = decoded.Height,
+            Rgba = rgba,
+            Name = texture.Name
+        };
+    }
+
+    private static byte[]? ToRgba(CTexture texture)
+    {
+        var pixelCount = texture.Width * texture.Height;
+        if (pixelCount <= 0)
+            return null;
+
+        var data = texture.Data;
+        var rgba = new byte[pixelCount * 4];
+
+        switch (texture.PixelFormat)
+        {
+            case EPixelFormat.PF_R8G8B8A8:
+                if (data.Length < rgba.Length) return null;
+                Buffer.BlockCopy(data, 0, rgba, 0, rgba.Length);
+                return rgba;
+            case EPixelFormat.PF_B8G8R8A8:
+            case EPixelFormat.PF_A8R8G8B8:
+                if (data.Length < rgba.Length) return null;
+                for (var i = 0; i < pixelCount; i++)
+                {
+                    var src = i * 4;
+                    rgba[src] = data[src + 2];
+                    rgba[src + 1] = data[src + 1];
+                    rgba[src + 2] = data[src];
+                    rgba[src + 3] = data[src + 3];
+                }
+                return rgba;
+            case EPixelFormat.PF_G8:
+                if (data.Length < pixelCount) return null;
+                for (var i = 0; i < pixelCount; i++)
+                {
+                    var dst = i * 4;
+                    rgba[dst] = data[i];
+                    rgba[dst + 1] = data[i];
+                    rgba[dst + 2] = data[i];
+                    rgba[dst + 3] = 255;
+                }
+                return rgba;
+            default:
+                return null;
+        }
+    }
+
+    private static Vector3 MaterialColor(string name, int index, ModelKind kind)
+    {
+        unchecked
+        {
+            var hash = 29 + index * 97;
+            foreach (var c in name)
+                hash = hash * 31 + c;
+
+            var hue = (Math.Abs(hash) % 360) / 360f;
+            var sat = kind == ModelKind.SkeletalMesh ? 0.12f : 0.16f;
+            var value = 0.58f + (Math.Abs(hash / 360) % 12) / 100f;
+            var tint = HsvToRgb(hue, sat, Math.Clamp(value, 0.56f, 0.70f));
+            var baseSkinLike = kind == ModelKind.SkeletalMesh
+                ? new Vector3(0.58f, 0.68f, 0.60f)
+                : new Vector3(0.62f, 0.66f, 0.68f);
+            return Vector3.Lerp(baseSkinLike, tint, 0.38f);
+        }
     }
 
     private static byte[]? RenderAndDispose(CSkeletalMesh mesh, int size, ModelItem model)
