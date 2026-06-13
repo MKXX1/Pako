@@ -51,6 +51,8 @@ internal static class Program
     private static ModelItem? _previewModel;
     private static ModelClass? _previewScene;
     private static Task<PreviewLoadResult>? _previewLoadTask;
+    private static int _previewLoadVersion;
+    private static bool _previewFocusRequested;
     private static string _previewError = "";
     private const float PreviewDefaultYaw = -0.65f;
     private const float PreviewDefaultPitch = 0.18f;
@@ -865,17 +867,30 @@ internal static class Program
 
     private static void OpenModelPreview(ModelItem model)
     {
+        var sameModel = _previewModel != null &&
+            string.Equals(_previewModel.ObjectPath, model.ObjectPath, StringComparison.Ordinal);
+
         _previewOpen = true;
+        _previewFocusRequested = true;
+
+        if (sameModel && (_previewLoadTask != null || _previewScene != null))
+        {
+            Log($"Preview already open: {model.DisplayName}");
+            return;
+        }
+
         _previewModel = model;
         _previewScene = null;
         _previewError = "";
         ResetPreviewView();
         _previewUseTextures = true;
         _previewSingleMaterial = false;
+        var requestId = ++_previewLoadVersion;
+        var objectPath = model.ObjectPath;
         _previewLoadTask = Task.Run(() =>
         {
             var scene = Assets.CreatePreviewScene(model, out var error);
-            return new PreviewLoadResult(scene, error);
+            return new PreviewLoadResult(requestId, objectPath, scene, error);
         });
         Log($"Opening preview: {model.DisplayName}");
     }
@@ -901,6 +916,13 @@ internal static class Program
             try
             {
                 var result = _previewLoadTask.GetAwaiter().GetResult();
+                if (result.RequestId != _previewLoadVersion ||
+                    _previewModel == null ||
+                    !string.Equals(_previewModel.ObjectPath, result.ObjectPath, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
                 _previewScene = result.Scene;
                 _previewError = result.Error;
                 _gpuPreviewSceneDirty = _previewScene != null;
@@ -917,14 +939,19 @@ internal static class Program
         }
 
         ImGui.SetNextWindowSize(new Vector2(900f, 760f), ImGuiCond.FirstUseEver);
+        if (_previewFocusRequested)
+            ImGui.SetNextWindowFocus();
+
         var open = _previewOpen;
         if (!ImGui.Begin("Model Preview", ref open, ImGuiWindowFlags.NoCollapse))
         {
             _previewOpen = open;
+            _previewFocusRequested = false;
             ImGui.End();
             return;
         }
         _previewOpen = open;
+        _previewFocusRequested = false;
 
         if (_previewModel == null)
         {
@@ -1087,7 +1114,7 @@ internal static class Program
 
     private static void DrawExportFormatSelector()
     {
-        var labels = new[] { "GLB (quick preview)", "ActorX PSK/PSKX (better skeleton)", "FBX via Blender (PSK -> FBX)" };
+        var labels = new[] { "GLB", "ActorX PSK/PSKX (better skeleton)", "FBX via Blender (PSK - FBX)" };
         var current = (int)_exportFormat;
         ImGui.SetNextItemWidth(260);
         if (ImGui.Combo("Export Format", ref current, labels, labels.Length))
@@ -1245,5 +1272,5 @@ internal static class Program
         }
     }
 
-    private readonly record struct PreviewLoadResult(ModelClass? Scene, string Error);
+    private readonly record struct PreviewLoadResult(int RequestId, string ObjectPath, ModelClass? Scene, string Error);
 }
